@@ -82,8 +82,8 @@ It must be in the **same directory** as `iam_ic_report.py`.
 
 ```
 Account No,Account ID,Account Owner,Account Type
-007952453283,Dev-App,Venura Ubayathilakarachchi,Development
-072308801333,BAU-Analyst,Janaka M. Perera,Production
+007952455555,Dev-App,Venura,Development
+072308805555,BAU-Analyst,Janaka,Production
 ```
 
 ---
@@ -112,7 +112,7 @@ AWS Account IDs:
 Example input:
 
 ```
-007952453283,072308801333
+00795245555,072308805555
 ```
 
 ---
@@ -170,3 +170,4 @@ identitystore:*
 iam:GetPolicy
 iam:GetPolicyVersion
 ```
+
