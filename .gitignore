@@ -1,0 +1,11 @@
+# Ignore everything
+*
+
+# But not these files
+!*.py
+
+# Optional: if you want to track folders containing .py files
+!*/
+
+# Optional: ignore .pyc files (compiled Python)
+*.pyc
