@@ -1,13 +1,12 @@
 import boto3
 from openpyxl import Workbook
 from botocore.exceptions import ClientError
-import json # Import json for better inline policy formatting
+import json
+import csv # Import the csv module
 
 # ------------------------------------------------------
 # Initialize AWS Clients
 # ------------------------------------------------------
-# NOTE: Ensure your AWS region is correct. The original was 'ap-southeast-1'.
-# If you are in another region, change this value.
 REGION = "ap-southeast-1"
 sso = boto3.client("sso-admin", region_name=REGION)
 identity = boto3.client("identitystore", region_name=REGION)
@@ -43,6 +42,62 @@ account_ids = [a.strip() for a in input("AWS Account IDs: ").split(",") if a.str
 if not account_ids:
     print("No account IDs provided. Exiting.")
     exit(1)
+
+# ------------------------------------------------------
+# NEW: Load Account Details from CSV (FIXED ENCODING & Robust Header Check)
+# ------------------------------------------------------
+def load_account_details(csv_file="AWS Account Owners.csv"):
+    """
+    Reads account details from the CSV file and returns a dictionary mapped by Account ID.
+    Uses 'latin-1' encoding to resolve UnicodeDecodeError and uses safe .get()
+    to prevent NoneType errors if headers are missing.
+    """
+    account_map = {}
+    
+    # Define expected headers
+    HEADER_ACCOUNT_ID = "Account No."
+    HEADER_ACCOUNT_NAME = "Account ID" # Using this field as 'Account Name'
+    HEADER_ACCOUNT_OWNER = "Account Owner"
+    HEADER_ACCOUNT_TYPE = "Account Type"
+
+    try:
+        # FIX 1: Changed encoding from 'utf-8' to 'latin-1' to handle byte 0xa0 error
+        with open(csv_file, mode='r', encoding='latin-1') as file:
+            reader = csv.DictReader(file)
+            
+            # Check for critical header: Account ID
+            if HEADER_ACCOUNT_ID not in reader.fieldnames:
+                print(f"❌ Critical Error: CSV file is missing the expected header column '{HEADER_ACCOUNT_ID}'.")
+                print(f"Found headers: {reader.fieldnames}")
+                return account_map 
+
+            for row in reader:
+                # FIX 2: Use .get(key, "") to provide an empty string default. 
+                # This prevents the 'NoneType' object has no attribute 'strip' error.
+                account_id = row.get(HEADER_ACCOUNT_ID, "").strip()
+                
+                if not account_id:
+                    continue 
+
+                account_name = row.get(HEADER_ACCOUNT_NAME, "").strip()
+                account_type = row.get(HEADER_ACCOUNT_TYPE, "").strip()
+                account_owner = row.get(HEADER_ACCOUNT_OWNER, "").strip()
+                
+                account_map[account_id] = {
+                    "Name": account_name or "N/A (CSV not found/mapped)",
+                    "Type": account_type or "N/A (CSV not found/mapped)",
+                    "Owner": account_owner or "N/A (CSV not found/mapped)"
+                }
+
+        print(f"✅ Successfully loaded account details from {csv_file}")
+    except FileNotFoundError:
+        print(f"⚠️ Warning: Account details file '{csv_file}' not found. Account details columns will be empty.")
+    except Exception as e:
+        print(f"❌ Error reading CSV file: {e}. Please ensure your CSV headers match the script's expectations.")
+        
+    return account_map
+
+account_details_map = load_account_details()
 
 # ------------------------------------------------------
 # Get Permission Sets for Account
@@ -126,9 +181,12 @@ wb = Workbook()
 ws = wb.active
 ws.title = "SSO Report"
 
-# Excel Header Row
+# UPDATED Excel Header Row to include Account Details
 ws.append([
     "Account ID",
+    "Account Name", # NEW COLUMN
+    "Account Type", # NEW COLUMN
+    "Account Owner", # NEW COLUMN
     "Principal ID",
     "Principal Type",
     "Group/User Name",
@@ -144,6 +202,13 @@ ws.append([
 # ------------------------------------------------------
 for account_id in account_ids:
     print(f"\n🔍 Processing Account: {account_id}")
+
+    # NEW: Retrieve Account Details
+    # Use .get() with a default empty dictionary for safety
+    details = account_details_map.get(account_id, {})
+    account_name = details.get("Name", "N/A (CSV not found/mapped)")
+    account_type = details.get("Type", "N/A (CSV not found/mapped)")
+    account_owner = details.get("Owner", "N/A (CSV not found/mapped)")
 
     permission_sets = get_permission_sets_for_account(account_id)
     if not permission_sets:
@@ -163,7 +228,7 @@ for account_id in account_ids:
 
         # --- Managed Policies (AWS and Customer by ARN) ---
         aws_managed = []
-        customer_managed_names = [] # This list will hold both ARN-attached and Reference-attached policy names
+        customer_managed_names = [] 
         next_token = None
         
         # 1. Policies attached by ARN (AWS or Customer Managed)
@@ -181,21 +246,19 @@ for account_id in account_ids:
                 if arn.startswith("arn:aws:iam::aws:policy"):
                     aws_managed.append(name)
                 else:
-                    # This captures Customer Managed Policies attached via ARN
                     customer_managed_names.append(name) 
 
             next_token = resp.get("NextToken")
             if not next_token:
                 break
         
-        # 2. FIX: Policies attached by Reference (Customer Managed, by Name/Path)
+        # 2. Policies attached by Reference (Customer Managed, by Name/Path)
         next_token = None
         while True:
             params = {"InstanceArn": instance_arn, "PermissionSetArn": ps_arn}
             if next_token:
                 params["NextToken"] = next_token
             
-            # Use the correct API to list Customer Managed Policies referenced by Name/Path
             resp = sso.list_customer_managed_policy_references_in_permission_set(**params)
 
             for policy_ref in resp.get("CustomerManagedPolicyReferences", []):
@@ -204,10 +267,8 @@ for account_id in account_ids:
                 
                 # Format policy name for readability: Path/Name
                 if ref_path and ref_path != '/':
-                    # Remove trailing slash if it exists, then combine with name
                     full_name = f"{ref_path.rstrip('/')}/{ref_name}"
                 else:
-                    # If path is '/' or empty, just use the name
                     full_name = ref_name
                     
                 customer_managed_names.append(full_name)
@@ -250,6 +311,7 @@ for account_id in account_ids:
             
             group_name = ""
             user_list_str = ""
+            user_or_group_name = "" # Initialize for safety
 
             if principal_type == "GROUP":
                 group_name = get_group_name(principal_id)
@@ -267,6 +329,9 @@ for account_id in account_ids:
 
             ws.append([
                 account_id,
+                account_name,
+                account_type,
+                account_owner,
                 principal_id,
                 principal_type,
                 user_or_group_name,
